@@ -1,0 +1,21 @@
+# Raw dataset (huge, provided by the challenge, not ours to version)
+dataset/
+
+# Cached cleaned parquet files + scored pairs (regenerable, large)
+code/business_entity_resolution/cache/
+
+# Output files (large, regenerable from code + dataset; only small samples get committed)
+output/*.tsv
+output/*.txt
+!output/README.md
+
+# OS / editor junk
+.DS_Store
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+
+# Logs from long background runs
+*.log
+**/*_log*.txt
