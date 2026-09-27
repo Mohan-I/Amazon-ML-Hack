@@ -30,6 +30,7 @@ import collections
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import polars as pl
 from rapidfuzz import fuzz
@@ -182,7 +183,7 @@ def add_derived_columns(df: pl.DataFrame) -> pl.DataFrame:
     ).select("entity_id", "country", "name_key", "pin", "name_core", "sig_tokens", "house_no", "addr_tokens")
 
 
-def load_source(split: str, source: str, limit: int | None = None, use_cache: bool = True) -> pl.DataFrame:
+def load_source(split: str, source: str, limit: Optional[int] = None, use_cache: bool = True) -> pl.DataFrame:
     path = DATA / split / f"{split}_{source}.tsv"
     cache_path = CACHE / f"{split}_{source}_clean_v2.parquet"
 

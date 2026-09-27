@@ -127,65 +127,80 @@ The complete runnable code is organized under `code/business_entity_resolution/`
 ```
 code/business_entity_resolution/
 ├── src/
-│   ├── preprocessing.py       # Text cleaning, normalization, unidecode
-│   ├── blocking.py            # TF-IDF vectorization + NearestNeighbors blocking (two-pass country-aware)
-│   ├── features.py            # Pairwise feature engineering (RapidFuzz, embeddings)
-│   ├── train.py               # LightGBM training + threshold tuning
-│   ├── predict.py             # Inference on test set
-│   └── utils.py               # Helper functions (IO, validation)
+│   ├── normalize.py           # Text cleaning, abbreviation expansion, PIN/city extraction, unidecode
+│   ├── blocking.py            # Two-pass country-aware inverted-index blocking + RapidFuzz re-rank
+│   ├── features.py            # 45 pairwise features (RapidFuzz, Jaccard, address/PIN/country flags)
+│   ├── data_utils.py          # Ground truth loading, entity-level train/val split
+│   ├── metric.py              # Official macro F_0.5 scorer
+│   ├── train_ml.py            # LightGBM training + evaluation
+│   ├── threshold_tune.py      # Threshold sweep → best_threshold.json + curve plot
+│   ├── score_ml.py            # Score test candidates with trained model
+│   ├── final_match.py         # Apply threshold → matching_results.tsv + candidate_pairs.tsv
+│   └── run_all.sh             # End-to-end reproduction script
 ├── README.md                  # Setup and reproduction instructions
-├── requirements.txt           # Python dependencies
-└── output/
-    ├── matching_results.tsv   # Final predictions
-    └── candidate_pairs.tsv    # Generated candidate pairs
+└── requirements.txt           # Pinned Python dependencies
 ```
 
-**Entry points to reproduce outputs:**
+**Entry points to reproduce outputs (run from `src/`):**
 
-1. **Preprocess data:**
+1. **Block train set** (candidate generation for training):
    ```bash
-   python src/preprocessing.py --input_dir data/ --output_dir processed/
+   python blocking.py --split train --max-candidates 20
    ```
 
-2. **Generate candidate pairs (two-pass country-aware blocking):**
+2. **Block test set** (candidate generation for submission):
    ```bash
-   python src/blocking.py --source1 processed/source1.csv \
-                          --source2 processed/source2.csv \
-                          --source3 processed/source3.csv \
-                          --output output/candidate_pairs.tsv
+   python blocking.py --split test --max-candidates 20
    ```
 
-3. **Train model:**
+3. **Train LightGBM model:**
    ```bash
-   python src/train.py --candidates output/candidate_pairs.tsv \
-                       --ground_truth data/train_gt.csv \
-                       --model_dir models/
+   python train_ml.py
+   # → models/lgbm_matcher.txt  +  output/pair_scores_train.tsv
    ```
 
-4. **Predict and generate final matches:**
+4. **Tune decision threshold (macro F_0.5 sweep on validation split):**
    ```bash
-   python src/predict.py --candidates output/candidate_pairs.tsv \
-                         --model models/lgbm_model.txt \
-                         --threshold 0.75 \
-                         --output output/matching_results.tsv
+   python threshold_tune.py
+   # → output/best_threshold.json  +  output/threshold_curve.csv
    ```
 
-5. **Validate submission:**
+5. **Score test candidates:**
    ```bash
-   python utils/validate_submission.py --matching output/matching_results.tsv \
-                                       --candidates output/candidate_pairs.tsv
+   python score_ml.py
+   # → output/pair_scores_test.tsv
+   ```
+
+6. **Apply threshold → final submission files:**
+   ```bash
+   python final_match.py
+   # → output/matching_results.tsv  +  output/candidate_pairs.tsv
+   ```
+
+7. **Validate submission format:**
+   ```bash
+   cd ../../..   # back to student_resource/
+   python utils/validate_submission.py \
+       --matching output/matching_results.tsv \
+       --candidate output/candidate_pairs.tsv \
+       --test-dir dataset/test
+   ```
+
+   Or run all steps at once:
+   ```bash
+   bash run_all.sh
    ```
 
 **Dependencies (`requirements.txt`):**
 ```
-pandas>=2.0.0
+polars==1.44.2
 numpy>=1.24.0
 scikit-learn>=1.3.0
-lightgbm>=4.0.0
-rapidfuzz>=3.0.0
-sentence-transformers>=2.2.0
-unidecode>=1.3.0
-tqdm>=4.65.0
+lightgbm==4.7.0
+rapidfuzz==3.14.6
+unidecode==1.4.0
+pyarrow>=17.0.0
+matplotlib>=3.7.0
 ```
 
 ### B. Additional Results

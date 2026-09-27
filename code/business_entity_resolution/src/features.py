@@ -16,7 +16,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple, Any, Set
+from typing import Dict, List, Optional, Tuple, Any, Set
 
 import numpy as np
 import polars as pl
@@ -131,8 +131,8 @@ FEATURE_NAMES = [
 
 def load_and_preprocess_records(
     split: str,
-    needed_eids: Set[str] | None = None,
-    limit: int | None = None,
+    needed_eids: Optional[Set[str]] = None,
+    limit: Optional[int] = None,
 ) -> Dict[str, RecordTuple]:
     """Loads Source 1, Source 2, and Source 3 records for a split and computes
     normalized fields stored as a compact in-memory lookup dictionary:

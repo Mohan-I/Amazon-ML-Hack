@@ -1,5 +1,10 @@
-polars==1.44.2
-rapidfuzz==3.14.6
-lightgbm==4.7.0
+# Python 3.9 compatible
+# polars >=1.37, lightgbm >=4.7, and rapidfuzz >=3.14 require Python >=3.10
+polars==1.36.1
+numpy>=1.24.0
+scikit-learn>=1.3.0
+lightgbm==4.6.0
+rapidfuzz==3.13.0
 unidecode==1.4.0
 pyarrow>=17.0.0
+matplotlib>=3.7.0
