@@ -48,10 +48,37 @@ CACHE.mkdir(parents=True, exist_ok=True)
 NAME_KEY_LEN = 4
 BUCKET_CAP = 150       # max ids stored per (country, key) bucket while indexing
 TOKEN_BUCKET_CAP = 300  # token buckets are broader, allow a bit more before truncating
-RAW_CAND_CAP = 200     # max raw candidates considered per S1 row before scoring
+HOUSE_STREET_CAP = 50  # house + street token composite bucket cap
+PIN_HOUSE_CAP = 50     # pin + house composite bucket cap
+ADDR_TOKEN_CAP = 100   # distinctive address token bucket cap
 CHUNK_SIZE = 20_000    # S1 rows processed per batch (bounds peak memory)
-N_SIG_TOKENS = 2       # number of longest/most-distinctive words used as token-blocking keys
+N_SIG_TOKENS = 3       # number of distinctive words used as token-blocking keys
 MIN_TOKEN_LEN = 3      # ignore very short words (low signal, huge buckets) as token keys
+
+ADDR_STOPWORDS = [
+    "road", "street", "avenue", "boulevard", "lane", "drive", "suite", "floor",
+    "unit", "apartment", "building", "near", "opposite", "behind", "north", "south",
+    "east", "west", "po", "box", "fl", "no", "shop", "dr", "rd", "st", "ave",
+    "blvd", "ln", "apt", "first", "second", "third", "block", "sector", "plot",
+    "district", "state", "city",
+    "nagar", "colony", "marg", "bazaar", "bazar", "complex", "plaza", "chowk",
+    "arcade", "mansion", "tower", "towers", "heights", "residency", "park", "garden",
+    "market", "center", "centre", "mall", "enclave", "vihar", "puram", "gali",
+    "delhi", "mumbai", "bangalore", "bengaluru", "kolkata", "hyderabad", "chennai",
+    "pune", "ahmedabad", "jaipur", "surat", "lucknow", "kanpur", "nagpur", "indore",
+    "thane", "bhopal", "patna", "vadodara", "ghaziabad", "ludhiana", "agra", "nashik",
+    "faridabad", "meerut", "rajkot", "varanasi", "srinagar", "aurangabad", "dhanbad",
+    "amritsar", "navi", "allahabad", "prayagraj", "ranchi", "howrah", "coimbatore",
+    "jabalpur", "gwalior", "vijayawada", "jodhpur", "madurai", "raipur", "kota",
+    "guwahati", "chandigarh", "noida", "gurgaon", "gurugram"
+]
+
+GENERIC_NAME_WORDS = [
+    "services", "associates", "enterprises", "solutions", "holdings", "group",
+    "international", "consulting", "management", "industries", "trading", "products",
+    "systems", "global", "company", "business", "corporation", "india", "pvt", "ltd",
+    "limited", "private"
+]
 
 
 def log(msg: str) -> None:
@@ -117,7 +144,7 @@ def add_derived_columns(df: pl.DataFrame) -> pl.DataFrame:
         .alias("name_core")
     )
 
-    df = df.with_columns(
+    return df.with_columns(
         [
             pl.col("name_core")
             .str.replace_all(r"[^a-z0-9]", "")
@@ -127,30 +154,37 @@ def add_derived_columns(df: pl.DataFrame) -> pl.DataFrame:
             .str.extract(r"\b(\d{6}|\d{5}(?:-\d{4})?)\b", 1)
             .fill_null("")
             .alias("pin"),
+            pl.col("clean_addr")
+            .str.extract(r"\b0*(\d+[-/]?\d*)\b", 1)
+            .fill_null("")
+            .alias("house_no"),
+            pl.col("name_core")
+            .str.split(" ")
+            .list.eval(pl.element().filter(
+                (pl.element().str.len_chars() >= MIN_TOKEN_LEN) &
+                (~pl.element().is_in(GENERIC_NAME_WORDS))
+            ))
+            .list.eval(pl.element().sort_by(pl.element().str.len_chars(), descending=True))
+            .list.head(N_SIG_TOKENS)
+            .alias("sig_tokens"),
+            pl.col("clean_addr")
+            .str.replace_all(r"[^a-z0-9\s]", " ")
+            .str.split(" ")
+            .list.eval(pl.element().filter(
+                (pl.element().str.len_chars() >= 4) &
+                (~pl.element().is_in(ADDR_STOPWORDS)) &
+                (~pl.element().str.contains(r"^\d+$"))
+            ))
+            .list.eval(pl.element().sort_by(pl.element().str.len_chars(), descending=True))
+            .list.head(2)
+            .alias("addr_tokens"),
         ]
-    )
-
-    # Significant tokens: the N longest words (>= MIN_TOKEN_LEN chars) in the
-    # core name, sorted alphabetically so token ORDER doesn't matter — this
-    # is what lets "Balaji Traders" and "Traders Balaji" still block together,
-    # and lets a typo in one word still match via the other word.
-    df = df.with_columns(
-        pl.col("name_core")
-        .str.split(" ")
-        .list.eval(pl.element().filter(pl.element().str.len_chars() >= MIN_TOKEN_LEN))
-        .list.eval(pl.element().sort_by(pl.element().str.len_chars(), descending=True))
-        .list.head(N_SIG_TOKENS)
-        .alias("sig_tokens")
-    )
-
-    # keep only what downstream needs — drops the raw/clean text columns to
-    # save memory; Part 2 (features) re-derives clean text itself.
-    return df.select("entity_id", "country", "name_key", "pin", "name_core", "sig_tokens")
+    ).select("entity_id", "country", "name_key", "pin", "name_core", "sig_tokens", "house_no", "addr_tokens")
 
 
 def load_source(split: str, source: str, limit: int | None = None, use_cache: bool = True) -> pl.DataFrame:
     path = DATA / split / f"{split}_{source}.tsv"
-    cache_path = CACHE / f"{split}_{source}_clean.parquet"
+    cache_path = CACHE / f"{split}_{source}_clean_v2.parquet"
 
     if limit is None and use_cache and cache_path.exists():
         log(f"loading cached {cache_path.name} ...")
@@ -176,6 +210,7 @@ def load_source(split: str, source: str, limit: int | None = None, use_cache: bo
     return df
 
 
+
 # ---------------------------------------------------------------------------
 # Inverted-index candidate generation (memory-safe: no join / cross product)
 # ---------------------------------------------------------------------------
@@ -196,9 +231,7 @@ def build_index(other: pl.DataFrame, key_col: str, cap: int = BUCKET_CAP) -> dic
 
 def build_token_index(other: pl.DataFrame, cap: int = TOKEN_BUCKET_CAP) -> dict:
     """dict[(country, token)] -> capped list of entity_id, one entry per
-    significant word in the business name (not just the whole-name prefix).
-    This is what lets word-reordering, and typos confined to one word,
-    still produce a match."""
+    significant word in the business name."""
     idx: dict = collections.defaultdict(list)
     for country, tokens, eid in zip(
         other["country"].to_list(), other["sig_tokens"].to_list(), other["entity_id"].to_list()
@@ -212,18 +245,84 @@ def build_token_index(other: pl.DataFrame, cap: int = TOKEN_BUCKET_CAP) -> dict:
     return idx
 
 
-def process_and_write(s1: pl.DataFrame, other: pl.DataFrame, out_path: Path, max_candidates: int) -> None:
+def build_house_street_index(other: pl.DataFrame, cap: int = HOUSE_STREET_CAP) -> dict:
+    """dict[(country, f'{house}_{street_token}')] -> capped list of entity_id."""
+    idx: dict = collections.defaultdict(list)
+    for country, house, tokens, eid in zip(
+        other["country"].to_list(), other["house_no"].to_list(), other["addr_tokens"].to_list(), other["entity_id"].to_list()
+    ):
+        if not house or not tokens:
+            continue
+        for tok in tokens:
+            bucket = idx[(country, f"{house}_{tok}")]
+            if len(bucket) < cap:
+                bucket.append(eid)
+    return idx
+
+
+def build_pin_house_index(other: pl.DataFrame, cap: int = PIN_HOUSE_CAP) -> dict:
+    """dict[(country, f'{pin}_{house}')] -> capped list of entity_id."""
+    idx: dict = collections.defaultdict(list)
+    for country, pin, house, eid in zip(
+        other["country"].to_list(), other["pin"].to_list(), other["house_no"].to_list(), other["entity_id"].to_list()
+    ):
+        if not pin or not house:
+            continue
+        bucket = idx[(country, f"{pin}_{house}")]
+        if len(bucket) < cap:
+            bucket.append(eid)
+    return idx
+
+
+def build_addr_token_index(other: pl.DataFrame, cap: int = ADDR_TOKEN_CAP) -> dict:
+    """dict[(country, addr_token)] -> capped list of entity_id for distinctive tokens (>=5 chars)."""
+    idx: dict = collections.defaultdict(list)
+    for country, tokens, eid in zip(
+        other["country"].to_list(), other["addr_tokens"].to_list(), other["entity_id"].to_list()
+    ):
+        if not tokens:
+            continue
+        for tok in tokens:
+            if len(tok) >= 5:
+                bucket = idx[(country, tok)]
+                if len(bucket) < cap:
+                    bucket.append(eid)
+    return idx
+
+
+def process_and_write(s1: pl.DataFrame, other: pl.DataFrame, out_path: Path, max_candidates: int) -> tuple:
     log("building name-key index ...")
-    name_idx = build_index(other, "name_key")
+    name_idx = build_index(other, "name_key", cap=BUCKET_CAP)
     log(f"name-key index: {len(name_idx):,} buckets")
     log("building pin index ...")
-    pin_idx = build_index(other, "pin")
+    pin_idx = build_index(other, "pin", cap=BUCKET_CAP)
     log(f"pin index: {len(pin_idx):,} buckets")
     log("building token index ...")
-    token_idx = build_token_index(other)
+    token_idx = build_token_index(other, cap=TOKEN_BUCKET_CAP)
     log(f"token index: {len(token_idx):,} buckets")
+    log("building house-street composite index ...")
+    house_street_idx = build_house_street_index(other, cap=HOUSE_STREET_CAP)
+    log(f"house-street index: {len(house_street_idx):,} buckets")
+    log("building pin-house composite index ...")
+    pin_house_idx = build_pin_house_index(other, cap=PIN_HOUSE_CAP)
+    log(f"pin-house index: {len(pin_house_idx):,} buckets")
+    log("building address-token index ...")
+    addr_tok_idx = build_addr_token_index(other, cap=ADDR_TOKEN_CAP)
+    log(f"address-token index: {len(addr_tok_idx):,} buckets")
 
-    core_lookup = dict(zip(other["entity_id"].to_list(), other["name_core"].to_list()))
+    log("building compact candidate metadata lookup ...")
+    c_eids = other["entity_id"].to_list()
+    c_cores = other["name_core"].to_list()
+    c_pins = other["pin"].to_list()
+    c_houses = other["house_no"].to_list()
+    c_stoks = [tuple(x) if x is not None else () for x in other["sig_tokens"].to_list()]
+    c_atoks = [tuple(x) if x is not None else () for x in other["addr_tokens"].to_list()]
+    cand_meta = dict(zip(c_eids, zip(c_cores, c_pins, c_houses, c_stoks, c_atoks)))
+    del c_eids, c_cores, c_pins, c_houses, c_stoks, c_atoks
+    del other
+    import gc
+    gc.collect()
+    log("freed candidate pool DataFrame, metadata lookup ready")
 
     s1_ids = s1["entity_id"].to_list()
     s1_country = s1["country"].to_list()
@@ -231,7 +330,12 @@ def process_and_write(s1: pl.DataFrame, other: pl.DataFrame, out_path: Path, max
     s1_pin = s1["pin"].to_list()
     s1_core = s1["name_core"].to_list()
     s1_tokens = s1["sig_tokens"].to_list()
+    s1_house = s1["house_no"].to_list()
+    s1_addr_tokens = s1["addr_tokens"].to_list()
     n = len(s1_ids)
+
+    total_raw_cands = 0
+    total_final_cands = 0
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("source1_entity_id\tcandidate_entity_ids\n")
@@ -239,8 +343,9 @@ def process_and_write(s1: pl.DataFrame, other: pl.DataFrame, out_path: Path, max
         for start in range(0, n, CHUNK_SIZE):
             end = min(start + CHUNK_SIZE, n)
             for i in range(start, end):
-                eid, country, nkey, pin, core, tokens = (
-                    s1_ids[i], s1_country[i], s1_nkey[i], s1_pin[i], s1_core[i], s1_tokens[i]
+                eid, country, nkey, pin, core, tokens, house, atoks = (
+                    s1_ids[i], s1_country[i], s1_nkey[i], s1_pin[i], s1_core[i],
+                    s1_tokens[i], s1_house[i], s1_addr_tokens[i]
                 )
                 cand_ids = set()
                 if nkey:
@@ -250,60 +355,154 @@ def process_and_write(s1: pl.DataFrame, other: pl.DataFrame, out_path: Path, max
                 if tokens:
                     for tok in tokens:
                         cand_ids.update(token_idx.get((country, tok), ()))
+                if house and atoks:
+                    for at in atoks:
+                        cand_ids.update(house_street_idx.get((country, f"{house}_{at}"), ()))
+                if pin and house:
+                    cand_ids.update(pin_house_idx.get((country, f"{pin}_{house}"), ()))
+                if atoks:
+                    for at in atoks:
+                        if len(at) >= 5:
+                            cand_ids.update(addr_tok_idx.get((country, at), ()))
+
+                raw_n = len(cand_ids)
+                total_raw_cands += raw_n
 
                 if not cand_ids:
                     f.write(f"{eid}\t\n")
                     continue
 
-                # Score every raw candidate (never truncate a plain set by
-                # slicing — set iteration order is arbitrary, so slicing
-                # first silently drops true matches at random). The bucket
-                # caps already bound how large cand_ids can get, so scoring
-                # all of them is cheap and safe.
-                scored = sorted(
-                    (
-                        (fuzz.token_sort_ratio(core, core_lookup.get(cid, "")), cid)
-                        for cid in cand_ids
-                    ),
-                    key=lambda t: t[0],
-                    reverse=True,
-                )
-                top = [cid for _, cid in scored[:max_candidates]]
+                # Shortlist generation (Req 4, 5, 6)
+                s1_tok_set = set(tokens) if tokens else set()
+                s1_at_set = set(atoks) if atoks else set()
+                pin_pfx = pin[:3] if len(pin) >= 3 else ""
+
+                if len(cand_ids) <= 100:
+                    shortlist = list(cand_ids)
+                else:
+                    cand_scored = []
+                    for cid in cand_ids:
+                        meta = cand_meta.get(cid)
+                        if not meta:
+                            continue
+                        c_core, c_pin, c_house, c_st, c_at = meta
+                        score = 0
+                        # 1. Exact normalized/core name match
+                        if core and core == c_core:
+                            score += 100
+                        # 2. Exact PIN match
+                        if pin and c_pin:
+                            if pin == c_pin:
+                                score += 25
+                            elif pin_pfx and c_pin.startswith(pin_pfx):
+                                score += 10
+                        # 3. Exact house number match
+                        if house and c_house and house == c_house:
+                            score += 25
+                        # 4. Address-token overlap
+                        if s1_at_set and c_at:
+                            for a in c_at:
+                                if a in s1_at_set:
+                                    score += 20
+                                    break
+                        # 5. Significant-name-token overlap
+                        if s1_tok_set and c_st:
+                            for t in c_st:
+                                if t in s1_tok_set:
+                                    score += 20
+                                    break
+                        # 6. Name_key match
+                        if nkey and c_core.startswith(nkey):
+                            score += 20
+                        cand_scored.append((score, cid))
+
+                    cand_scored.sort(key=lambda x: x[0], reverse=True)
+                    shortlist = [cid for _, cid in cand_scored[:100]]
+
+                # Run rapidfuzz ONLY on that shortlist (Req 7)
+                final_scored = []
+                for cid in shortlist:
+                    meta = cand_meta.get(cid)
+                    c_core, c_pin, c_house, c_st, c_at = meta if meta else ("", "", "", (), ())
+                    sim = fuzz.token_sort_ratio(core, c_core)
+
+                    bonus = 0
+                    if house and c_house and house == c_house:
+                        if pin and c_pin and pin == c_pin:
+                            bonus = 25
+                        else:
+                            bonus = 15
+                    elif pin and c_pin and pin == c_pin:
+                        bonus = 10
+
+                    if s1_at_set and c_at:
+                        for a in c_at:
+                            if a in s1_at_set:
+                                bonus += 10
+                                break
+
+                    final_score = min(100, sim + bonus)
+                    final_scored.append((final_score, cid))
+
+                # Final top max_candidates (Req 8)
+                final_scored.sort(key=lambda t: t[0], reverse=True)
+                top = [cid for _, cid in final_scored[:max_candidates]]
+                total_final_cands += len(top)
                 f.write(f"{eid}\t{','.join(top)}\n")
 
             log(f"  processed {end:,}/{n:,} S1 rows ({time.time() - t0:.1f}s elapsed)")
 
     log(f"wrote {out_path}")
+    log(f"Candidates generated before final top-K: {total_raw_cands:,} (avg {total_raw_cands/n:.1f}/S1)")
+    log(f"Candidates generated after final top-K : {total_final_cands:,} (avg {total_final_cands/n:.1f}/S1)")
+    return total_raw_cands, total_final_cands
 
 
 def eval_recall(out_path: Path, gt_path: Path) -> None:
-    gt = pl.read_csv(gt_path, separator="\t", infer_schema_length=0)
-    gt_map: dict = {}
-    n_true = 0
-    for sid, matched in zip(gt["source1_entity_id"].to_list(), gt["matched_entity_ids"].to_list()):
-        s = set(matched.split(",")) if matched else set()
-        gt_map[sid] = s
-        n_true += len(s)
-
     cand = pl.read_csv(out_path, separator="\t", infer_schema_length=0)
+    cand_s1_ids = cand["source1_entity_id"].to_list()
+    cand_s1_set = set(cand_s1_ids)
+
+    gt = pl.read_csv(gt_path, separator="\t", infer_schema_length=0)
+    if len(cand_s1_set) < gt.height:
+        gt = gt.filter(pl.col("source1_entity_id").is_in(cand_s1_set))
+
+    gt_map: dict = {}
+    n_sample_true = 0
+    s1_with_true = 0
+    for sid, matched in zip(gt["source1_entity_id"].to_list(), gt["matched_entity_ids"].to_list()):
+        s = set(matched.split(",")) if matched and matched.strip() else set()
+        gt_map[sid] = s
+        if s:
+            s1_with_true += 1
+            n_sample_true += len(s)
+
     total_cands = 0
+    max_cands = 0
     entities_with_cands = 0
     found = 0
-    for sid, cands in zip(cand["source1_entity_id"].to_list(), cand["candidate_entity_ids"].to_list()):
-        c = set(cands.split(",")) if cands else set()
+    for sid, cands in zip(cand_s1_ids, cand["candidate_entity_ids"].to_list()):
+        c = set(cands.split(",")) if cands and cands.strip() else set()
+        c_len = len(c)
+        if c_len > max_cands:
+            max_cands = c_len
         if c:
             entities_with_cands += 1
-            total_cands += len(c)
+            total_cands += c_len
         true = gt_map.get(sid, set())
         found += len(true & c)
 
-    recall = found / n_true if n_true else 1.0
-    avg_cands = total_cands / entities_with_cands if entities_with_cands else 0
+    recall = found / n_sample_true if n_sample_true else 1.0
+    avg_cands_per_sampled = total_cands / len(cand_s1_ids) if cand_s1_ids else 0.0
 
-    log(f"TRUE matches in ground truth : {n_true:,}")
-    log(f"TRUE matches captured by blocking : {found:,}")
-    log(f"BLOCKING RECALL (upper bound on final F0.5) : {recall:.4f}")
-    log(f"avg candidates per S1 entity (with >=1 candidate) : {avg_cands:.1f}")
+    log(f"Number of sampled S1 entities                     : {len(cand_s1_ids):,}")
+    log(f"Sampled S1 entities with at least one true match   : {s1_with_true:,}")
+    log(f"Total TRUE matches in the sample                   : {n_sample_true:,}")
+    log(f"Captured TRUE matches                              : {found:,}")
+    log(f"BLOCKING RECALL (upper bound on final F0.5)        : {recall:.4f}")
+    log(f"Average candidates per sampled S1                  : {avg_cands_per_sampled:.1f}")
+    log(f"Maximum candidates per sampled S1                  : {max_cands:,}")
+
 
 
 # ---------------------------------------------------------------------------
@@ -311,29 +510,60 @@ def eval_recall(out_path: Path, gt_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def main():
+    if sys.stdout.encoding.lower() != "utf-8":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("--split", choices=["train", "test"], required=True)
+    ap.add_argument("--split", choices=["train", "test"], default="train")
     ap.add_argument("--max-candidates", type=int, default=20)
     ap.add_argument("--limit", type=int, default=None, help="row limit per source file, for smoke testing")
+    ap.add_argument("--val-only", "--validate", dest="val_only", action="store_true", help="validation-only mode: sample S1 while indexing FULL S2 and S3")
+    ap.add_argument("--val-samples", type=int, default=10000, help="number of S1 records to sample for validation mode")
+    ap.add_argument("--out-file", type=str, default=None, help="custom output candidate filename")
     args = ap.parse_args()
 
     t0 = time.time()
-    s1 = load_source(args.split, "source1", args.limit)
-    s2 = load_source(args.split, "source2", args.limit)
-    s3 = load_source(args.split, "source3", args.limit)
 
-    log("combining S2 + S3 into one candidate pool ...")
-    other = pl.concat([s2, s3])
-    del s2, s3
+    if args.val_only:
+        log(f"=== VALIDATION-ONLY MODE: Sampling {args.val_samples:,} S1 rows against FULL S2 + S3 index ===")
+        # Load S1 from cache/disk without limit, then slice the first val_samples records
+        s1 = load_source("train", "source1", limit=None).head(args.val_samples)
+        log(f"selected {s1.height:,} S1 records for validation")
 
-    out_path = OUT / f"candidate_pairs_{args.split}.tsv"
-    process_and_write(s1, other, out_path, args.max_candidates)
+        # Load FULL S2 and S3 (limit=None ensures all records are indexed)
+        s2 = load_source("train", "source2", limit=None)
+        s3 = load_source("train", "source3", limit=None)
 
-    if args.split == "train":
+        log("combining FULL S2 + S3 into one candidate pool ...")
+        other = pl.concat([s2, s3])
+        del s2, s3
+
+        out_path = Path(args.out_file) if args.out_file else (OUT / f"candidate_pairs_val_{args.max_candidates}.tsv")
+        process_and_write(s1, other, out_path, args.max_candidates)
+
         gt_path = DATA / "train" / "train_ground_truth.tsv"
         eval_recall(out_path, gt_path)
+    else:
+        s1 = load_source(args.split, "source1", args.limit)
+        s2 = load_source(args.split, "source2", args.limit)
+        s3 = load_source(args.split, "source3", args.limit)
+
+        log("combining S2 + S3 into one candidate pool ...")
+        other = pl.concat([s2, s3])
+        del s2, s3
+
+        out_path = Path(args.out_file) if args.out_file else (OUT / f"candidate_pairs_{args.split}.tsv")
+        process_and_write(s1, other, out_path, args.max_candidates)
+
+        if args.split == "train":
+            gt_path = DATA / "train" / "train_ground_truth.tsv"
+            eval_recall(out_path, gt_path)
 
     log(f"done in {time.time() - t0:.1f}s")
+
 
 
 if __name__ == "__main__":
