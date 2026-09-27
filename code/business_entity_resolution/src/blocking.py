@@ -291,7 +291,14 @@ def build_addr_token_index(other: pl.DataFrame, cap: int = ADDR_TOKEN_CAP) -> di
     return idx
 
 
-def process_and_write(s1: pl.DataFrame, other: pl.DataFrame, out_path: Path, max_candidates: int) -> tuple:
+def process_and_write(
+    s1: pl.DataFrame,
+    other: pl.DataFrame,
+    out_path: Path,
+    max_candidates: int,
+    start_index: int = 0,
+    resume: bool = False,
+) -> tuple:
     log("building name-key index ...")
     name_idx = build_index(other, "name_key", cap=BUCKET_CAP)
     log(f"name-key index: {len(name_idx):,} buckets")
@@ -335,19 +342,36 @@ def process_and_write(s1: pl.DataFrame, other: pl.DataFrame, out_path: Path, max
     s1_addr_tokens = s1["addr_tokens"].to_list()
     n = len(s1_ids)
 
+    done_eids = set()
+    write_mode = "w"
+    if (resume or start_index > 0) and out_path.exists() and out_path.stat().st_size > 0:
+        write_mode = "a"
+        with open(out_path, "r", encoding="utf-8", errors="ignore") as rf:
+            for line_idx, line in enumerate(rf):
+                if line_idx == 0 and line.startswith("source1_entity_id"):
+                    continue
+                if "\t" in line:
+                    sid = line.split("\t", 1)[0].strip()
+                    if sid:
+                        done_eids.add(sid)
+        log(f"Resume mode active: {len(done_eids):,} S1 rows already in {out_path.name}; starting at index {start_index:,} in append mode")
+
     total_raw_cands = 0
     total_final_cands = 0
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("source1_entity_id\tcandidate_entity_ids\n")
+    with open(out_path, write_mode, encoding="utf-8") as f:
+        if write_mode == "w":
+            f.write("source1_entity_id\tcandidate_entity_ids\n")
         t0 = time.time()
-        for start in range(0, n, CHUNK_SIZE):
+        for start in range(start_index, n, CHUNK_SIZE):
             end = min(start + CHUNK_SIZE, n)
             for i in range(start, end):
                 eid, country, nkey, pin, core, tokens, house, atoks = (
                     s1_ids[i], s1_country[i], s1_nkey[i], s1_pin[i], s1_core[i],
                     s1_tokens[i], s1_house[i], s1_addr_tokens[i]
                 )
+                if eid in done_eids:
+                    continue
                 cand_ids = set()
                 if nkey:
                     cand_ids.update(name_idx.get((country, nkey), ()))
@@ -451,11 +475,13 @@ def process_and_write(s1: pl.DataFrame, other: pl.DataFrame, out_path: Path, max
                 total_final_cands += len(top)
                 f.write(f"{eid}\t{','.join(top)}\n")
 
+            f.flush()
             log(f"  processed {end:,}/{n:,} S1 rows ({time.time() - t0:.1f}s elapsed)")
 
     log(f"wrote {out_path}")
-    log(f"Candidates generated before final top-K: {total_raw_cands:,} (avg {total_raw_cands/n:.1f}/S1)")
-    log(f"Candidates generated after final top-K : {total_final_cands:,} (avg {total_final_cands/n:.1f}/S1)")
+    denom = max(1, n - start_index)
+    log(f"Candidates generated before final top-K: {total_raw_cands:,} (avg {total_raw_cands/denom:.1f}/S1)")
+    log(f"Candidates generated after final top-K : {total_final_cands:,} (avg {total_final_cands/denom:.1f}/S1)")
     return total_raw_cands, total_final_cands
 
 
@@ -524,6 +550,8 @@ def main():
     ap.add_argument("--val-only", "--validate", dest="val_only", action="store_true", help="validation-only mode: sample S1 while indexing FULL S2 and S3")
     ap.add_argument("--val-samples", type=int, default=10000, help="number of S1 records to sample for validation mode")
     ap.add_argument("--out-file", type=str, default=None, help="custom output candidate filename")
+    ap.add_argument("--start-index", type=int, default=0, help="0-based S1 row index to start/resume from (appends to existing file)")
+    ap.add_argument("--resume", action="store_true", help="resume by appending to existing output file and skipping already processed S1 IDs")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -543,7 +571,10 @@ def main():
         del s2, s3
 
         out_path = Path(args.out_file) if args.out_file else (OUT / f"candidate_pairs_val_{args.max_candidates}.tsv")
-        process_and_write(s1, other, out_path, args.max_candidates)
+        process_and_write(
+            s1, other, out_path, args.max_candidates,
+            start_index=args.start_index, resume=args.resume,
+        )
 
         gt_path = DATA / "train" / "train_ground_truth.tsv"
         eval_recall(out_path, gt_path)
@@ -557,7 +588,10 @@ def main():
         del s2, s3
 
         out_path = Path(args.out_file) if args.out_file else (OUT / f"candidate_pairs_{args.split}.tsv")
-        process_and_write(s1, other, out_path, args.max_candidates)
+        process_and_write(
+            s1, other, out_path, args.max_candidates,
+            start_index=args.start_index, resume=args.resume,
+        )
 
         if args.split == "train":
             gt_path = DATA / "train" / "train_ground_truth.tsv"
