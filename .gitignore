@@ -19,3 +19,6 @@ __pycache__/
 # Logs from long background runs
 *.log
 **/*_log*.txt
+
+# Submission packages (too large for GitHub)
+*.zip

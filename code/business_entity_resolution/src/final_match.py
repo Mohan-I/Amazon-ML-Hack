@@ -138,7 +138,7 @@ def main():
         log(f"  WARNING: {violations:,} S1 entities have matches outside candidates "
             f"(pipeline bug — validator will warn)")
     else:
-        log(f"  subset check PASS: all matches ⊆ candidates")
+        log(f"  subset check PASS: all matches in candidates")
 
     log(f"done in {time.time() - t0:.1f}s "
         f"(threshold={threshold}, matched={n_matched:,}, singletons={n_singletons:,})")
