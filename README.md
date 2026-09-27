@@ -142,28 +142,36 @@ python final_match.py --conservative   # higher tie-break threshold
 ## 📂 Project Structure
 
 ```
-ML SQUAD_submission.zip
-├── output/
-│   ├── matching_results.tsv          # ✅ scored on leaderboard
-│   └── candidate_pairs.tsv           # blocking audit set
+Amazon-ML-Hack/
+├── .gitignore
+├── Documentation_template.md          ✅ top-level (spec)
+├── LICENSE                            ✅ MIT
+├── README.md                          ✅ this file - repo readme
 ├── code/
 │   └── business_entity_resolution/
-│       ├── src/
-│       │   ├── normalize.py          # text cleaning, unidecode, PIN/city extract
-│       │   ├── blocking.py           # two-pass country-aware inverted-index blocking
-│       │   ├── features.py           # 45 pairwise features
-│       │   ├── data_utils.py         # GT loading, entity-level split
-│       │   ├── metric.py             # official macro F₀.₅ scorer
-│       │   ├── train_ml.py           # LightGBM training
-│       │   ├── threshold_tune.py     # threshold sweep + curve
-│       │   ├── score_ml.py           # test candidate scoring
-│       │   ├── final_match.py        # threshold → matching_results.tsv
-│       │   └── run_all.sh            # end-to-end reproduction
+│       ├── README.md                  ✅ reproduction instructions
 │       ├── models/
-│       │   └── lgbm_matcher.txt      # trained LightGBM booster
-│       ├── README.md                 # this file
-│       └── requirements.txt
-└── Documentation_template.md         # methodology write-up (top level)
+│       │   └── lgbm_matcher.txt       ✅ trained LightGBM model
+│       ├── requirements.txt           ✅ pinned deps
+│       └── src/
+│           ├── blocking.py            # two-pass country-aware inverted-index blocking
+│           ├── data_utils.py          # GT loading, entity-level split
+│           ├── features.py            # 45 pairwise features
+│           ├── final_match.py         # threshold → matching_results.tsv
+│           ├── metric.py              # official macro F₀.₅ scorer
+│           ├── normalize.py           # text cleaning, unidecode, PIN/city extract
+│           ├── run_all.sh             ✅ end-to-end entry point 
+│           ├── score_ml.py            # test candidate scoring
+│           ├── threshold_tune.py      # threshold sweep + curve
+│           └── train_ml.py            # LightGBM training
+│           └── legacy/                (optional)
+│               └── match_baseline.py
+├── output/
+│   ├── matching_results.tsv           🔴 MUST GENERATE # ✅ scored on leaderboard
+│   ├── candidate_pairs.tsv            🔴 MUST GENERATE # blocking audit set
+│   └── README.md                      (optional — can stay or be removed)
+└── utils/
+    └── validate_submission.py         ✅
 ```
 
 ---
